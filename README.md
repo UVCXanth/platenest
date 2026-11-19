@@ -92,6 +92,7 @@ optimizer through `spyrrow`. The ordinary `pack()` call and the stdlib-only
 ```python
 from platenest import optimize
 
+operator_requested_best = False  # the caller may set this from its UI
 best = optimize(
     parts,
     zone,
@@ -112,7 +113,9 @@ Frame holes remain available to the bitmap packer; Sparrow's Python wrapper
 conservatively treats an item's holes as solid. An unsupported or unsuccessful
 candidate never replaces the existing result.
 
-Fixed demands stay complete and aim for fewer plates. Each fill part retains
+Fixed demands stay complete and aim for fewer plates. The strip result is
+conservatively divided into finite plates without cutting or dropping any part;
+every resulting plate is checked against the original work zone. Each fill part retains
 its own plate and cannot lose copies to improve another fill part. The group
 returned by the strip optimizer is rigidly rotated/repositioned to the work
 zone before checking it; a reported strip width alone is not a fit decision.

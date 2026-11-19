@@ -148,18 +148,42 @@ def _candidate(best, indices, placements, parts, options):
     plate_ids = {old: new for new, old in enumerate(sorted({p.plate for p in retained}))}
     target = len(plate_ids)
     combined = tuple(replace(p, plate=plate_ids[p.plate]) for p in retained) + tuple(
-        replace(p, plate=target) for p in placements
+        replace(p, plate=target + p.plate) for p in placements
     )
     counts = dict(best.fill_counts)
     for index in indices:
         if parts[index].fill:
             counts[index] = sum(p.part == index for p in placements)
     return PackResult(
-        target + 1,
+        target + max(p.plate for p in placements) + 1,
         combined,
         fill_counts=counts,
         fill_limited=frozenset(i for i, n in counts.items() if n >= options.fill_limit),
     )
+
+
+def _plates(placements, outlines, bounds, free, centre):
+    """Adapt a strip result to finite beds, preserving every requested copy.
+
+    Only complete parts enter a bed. Parts crossing a tentative cut remain for
+    a later bed. Each group keeps its relative layout and is checked afterwards.
+    This is a conservative adapter, not a replacement bin-packing engine.
+    """
+    pending = [(p, _transformed(outlines[p.part], p).bounds) for p in placements]
+    result = []
+    width = bounds[2] - bounds[0]
+    plate = 0
+    while pending:
+        left = min(b[0] for _, b in pending)
+        selected = [(p, b) for p, b in pending if b[2] - left <= width + 1e-7]
+        if not selected:
+            return None
+        normalized = _normalize(tuple(p for p, _ in selected), outlines, bounds, free, centre)
+        result.extend(replace(p, plate=plate) for p in normalized)
+        chosen = {id(p) for p, _ in selected}
+        pending = [(p, b) for p, b in pending if id(p) not in chosen]
+        plate += 1
+    return tuple(result)
 
 
 def optimize(
@@ -266,7 +290,7 @@ def optimize(
                     break
                 continue
             demands = {i: int(parts[i].quantity) for i in indices}
-        if sum(outlines[i].area * n for i, n in demands.items()) > region.area + 1e-6:
+        if filling and sum(outlines[i].area * n for i, n in demands.items()) > region.area + 1e-6:
             groups.remove(indices)
             if not groups:
                 break
@@ -292,7 +316,11 @@ def optimize(
             Placement(int(p.id), 0, p.translation[0], p.translation[1], p.rotation) for p in solution.placed_items
         )
         if len(placed) == sum(demands.values()):
-            placed = _normalize(placed, outlines, bounds, free_rotation, options.centre)
-            accept(_candidate(best, indices, placed, parts, options))
+            if filling:
+                placed = _normalize(placed, outlines, bounds, free_rotation, options.centre)
+            else:
+                placed = _plates(placed, outlines, bounds, free_rotation, options.centre)
+            if placed:
+                accept(_candidate(best, indices, placed, parts, options))
         report("sparrow")
     return best

@@ -57,10 +57,10 @@ def test_normalization_recovers_solver_coordinate_frame_without_deforming_parts(
     assert ((result[1].x - result[0].x) ** 2 + (result[1].y - result[0].y) ** 2) ** 0.5 == pytest.approx(30)
 
 
-def _fake_solver(monkeypatch, positions):
+def _fake_solver(monkeypatch, positions, baseline=None):
     import platenest.optimization as module
 
-    baseline = PackResult(1, (Placement(0, 0, 1, 1, 0), Placement(0, 0, 23, 1, 0)), fill_counts={0: 2})
+    baseline = baseline or PackResult(1, (Placement(0, 0, 1, 1, 0), Placement(0, 0, 23, 1, 0)), fill_counts={0: 2})
     monkeypatch.setattr(module, "pack", lambda *a, **k: baseline)
     solver = SimpleNamespace(placed_items=[SimpleNamespace(id="0", translation=p, rotation=0) for p in positions])
     monkeypatch.setitem(
@@ -98,3 +98,18 @@ def test_solver_collision_never_replaces_incumbent(monkeypatch):
         finish=lambda: bool(events and events[-1].engine == "sparrow"),
     )
     assert result == baseline
+
+
+def test_a_strip_can_reduce_multiple_counted_plates_without_losing_copies(monkeypatch):
+    baseline = PackResult(3, tuple(Placement(0, plate, x, 1, 0) for plate in range(3) for x in (1, 23)))
+    _fake_solver(monkeypatch, [(x, y) for x in (1, 23, 45) for y in (1, 23)], baseline)
+    events = []
+    result = optimize(
+        [Part(*box(20, 20, 5), quantity=6)],
+        Zone(60, 60),
+        progress=events.append,
+        finish=lambda: bool(events and events[-1].best.plate_count == 2),
+    )
+    assert result.plate_count == 2
+    assert len(result.placements) == 6
+    assert {p.plate for p in result.placements} == {0, 1}
