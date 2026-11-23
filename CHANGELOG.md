@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **Long-search recovery:** a failed finite-angle seed can try additional rigid and native free-angle seeds.
+  A recoverable native trial error retains the last validated layout and reports a diagnostic; cancellation
+  and resource failures still propagate. Each active group receives its own restricted/free rotation cycle.
 - **Optional longer search:** `optimize()` keeps a checked initial bitmap layout, tries rotation preferences
   and the ready-made Sparrow solver, and returns the best valid result. Continuous Z rotations, original
   contour/keep-out checks, full fixed demands, independent fill plates and cooperative finish/cancel are

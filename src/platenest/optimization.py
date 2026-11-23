@@ -9,6 +9,7 @@ attempts; callers needing a hard deadline should retain their process supervisor
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import time
@@ -21,6 +22,8 @@ import numpy as np
 from platenest.packing import Cancelled, pack
 from platenest.types import Options, PackResult, Part, Placement, Zone
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class SearchProgress:
@@ -28,6 +31,7 @@ class SearchProgress:
     elapsed: float
     best: PackResult
     attempt: int
+    diagnostic: str | None = None
 
 
 def _geometry(parts, zone, spacing):
@@ -220,16 +224,76 @@ def optimize(
     # A positive raster spacing avoids the documented sub-pixel overlaps of pack(spacing=0).
     baseline_options = replace(options, spacing=max(options.spacing, 0.001))
     best = pack(parts, zone, baseline_options, cancel=cancel)
-    if best.rejected:
+    if best.rejected and (not free_rotation or any(r.reason != "too_large" for r in best.rejected)):
         return best
     outlines, region = _geometry(parts, zone, options.spacing)
+    if best.rejected:
+        # Raster seed angles are not a proof that free rotation cannot fit.
+        # Reuse the existing rigid-group normalization to suggest feasible
+        # angles, then let the ordinary packer and original contours judge.
+        def initial_stop():
+            if cancel is not None and cancel():
+                raise Cancelled
+            return time.monotonic() >= deadline or (finish is not None and finish())
+
+        if initial_stop() or region.is_empty or any(outlines[r.part].area > region.area for r in best.rejected):
+            return best
+        angles = list(options.rotations)
+        for rejected in best.rejected:
+            placed = _normalize((Placement(rejected.part, 0, 0, 0, 0),), outlines, region.bounds, True, False)
+            angles.extend((placed[0].angle + quarter) % 360 for quarter in (0, 90, 180, 270))
+        try:
+            candidate = pack(
+                parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=initial_stop
+            )
+            if not candidate.rejected:
+                best = candidate
+            # Native free angles also get a bounded opportunity if the rigid
+            # seed still fails (for example, around a bed exclusion).
+            for rejected in candidate.rejected:
+                remaining = deadline - time.monotonic()
+                if initial_stop() or remaining < 1:
+                    break
+                try:
+                    item = spyrrow.Item(str(rejected.part), list(outlines[rejected.part].exterior.coords), 1, None)
+                    solution = spyrrow.StripPackingInstance(
+                        "platenest-initial", region.bounds[3] - region.bounds[1], [item]
+                    ).solve(
+                        spyrrow.StripPackingConfig(
+                            early_termination=False,
+                            min_items_separation=options.spacing + 0.001,
+                            total_computation_time=max(1, int(min(3, remaining))),
+                            num_workers=2,
+                            seed=seed,
+                        )
+                    )
+                except ValueError as error:
+                    logger.warning("Sparrow initial trial failed: %s", error)
+                    continue
+                for placed_item in solution.placed_items:
+                    placement = Placement(rejected.part, 0, *placed_item.translation, placed_item.rotation)
+                    normalized = _normalize((placement,), outlines, region.bounds, True, False)
+                    angles.extend((normalized[0].angle + quarter) % 360 for quarter in (0, 90, 180, 270))
+                candidate = pack(
+                    parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=initial_stop
+                )
+                if not candidate.rejected:
+                    best = candidate
+                    break
+        except Cancelled:
+            if cancel is not None and cancel():
+                raise
+            return best
+        if best.rejected:
+            logger.info("Free-angle initialization exhausted its bounded attempts without a feasible layout")
+            return best
     if not _valid(best, parts, outlines, region, options, free_rotation):
         raise ValueError("initial packing did not satisfy the original geometry")
     attempt = 0
 
-    def report(engine):
+    def report(engine, diagnostic=None):
         if progress is not None:
-            progress(SearchProgress(engine, time.monotonic() - started, best, attempt))
+            progress(SearchProgress(engine, time.monotonic() - started, best, attempt, diagnostic))
 
     def stopped():
         if cancel is not None and cancel():
@@ -269,6 +333,7 @@ def optimize(
     if not groups or region.is_empty:
         return best
     bounds = region.bounds
+    group_attempts = Counter()
     for turn in range(10000):
         if stopped():
             break
@@ -299,7 +364,8 @@ def optimize(
         if remaining < 1:
             break
         # Restricted trials are members of the unrestricted portfolio too.
-        continuous = free_rotation and turn % 2 == 1
+        continuous = free_rotation and group_attempts[indices] % 2 == 1
+        group_attempts[indices] += 1
         rotations = None if continuous else [0, 90, 180, 270] if free_rotation else list(options.rotations)
         items = [spyrrow.Item(str(i), list(outlines[i].exterior.coords), n, rotations) for i, n in demands.items()]
         instance = spyrrow.StripPackingInstance("platenest", bounds[3] - bounds[1], items)
@@ -311,7 +377,15 @@ def optimize(
             seed=rng.randrange(2**31),
         )
         attempt += 1
-        solution = instance.solve(config)
+        try:
+            solution = instance.solve(config)
+        except ValueError as error:
+            # A failed optional trial cannot invalidate a checked incumbent.
+            # Cancellation, MemoryError and process limits remain distinct.
+            diagnostic = f"{type(error).__name__}: {str(error)[:300]}"
+            logger.warning("Sparrow trial failed; keeping the validated layout: %s", diagnostic)
+            report("sparrow", diagnostic)
+            continue
         placed = tuple(
             Placement(int(p.id), 0, p.translation[0], p.translation[1], p.rotation) for p in solution.placed_items
         )

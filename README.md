@@ -89,6 +89,12 @@ a desktop CPU.
 optimizer through `spyrrow`. The ordinary `pack()` call and the stdlib-only
 3MF module keep their existing dependencies and deterministic behavior.
 
+Free-angle search can recover an initial finite-angle rejection using bounded additional seeds; a rejected
+search is not a proof that no continuous-angle solution exists. Proven height/area impossibilities remain
+fast rejections. Recoverable native `ValueError` trials keep the last original-contour-validated layout and
+report `SearchProgress.diagnostic`; cancellation and resource errors remain failures, not successful results.
+Restricted and continuous native trials alternate independently for each active group.
+
 ```python
 from platenest import optimize
 
