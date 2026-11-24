@@ -227,16 +227,20 @@ def optimize(
     if best.rejected and (not free_rotation or any(r.reason != "too_large" for r in best.rejected)):
         return best
     outlines, region = _geometry(parts, zone, options.spacing)
+    soft_stop_requested = False
+
+    def stopped():
+        nonlocal soft_stop_requested
+        if cancel is not None and cancel():
+            raise Cancelled
+        soft_stop_requested = time.monotonic() >= deadline or (finish is not None and finish())
+        return soft_stop_requested
+
     if best.rejected:
         # Raster seed angles are not a proof that free rotation cannot fit.
         # Reuse the existing rigid-group normalization to suggest feasible
         # angles, then let the ordinary packer and original contours judge.
-        def initial_stop():
-            if cancel is not None and cancel():
-                raise Cancelled
-            return time.monotonic() >= deadline or (finish is not None and finish())
-
-        if initial_stop() or region.is_empty or any(outlines[r.part].area > region.area for r in best.rejected):
+        if stopped() or region.is_empty or any(outlines[r.part].area > region.area for r in best.rejected):
             return best
         angles = list(options.rotations)
         for rejected in best.rejected:
@@ -244,7 +248,7 @@ def optimize(
             angles.extend((placed[0].angle + quarter) % 360 for quarter in (0, 90, 180, 270))
         try:
             candidate = pack(
-                parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=initial_stop
+                parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=stopped
             )
             if not candidate.rejected:
                 best = candidate
@@ -252,7 +256,7 @@ def optimize(
             # seed still fails (for example, around a bed exclusion).
             for rejected in candidate.rejected:
                 remaining = deadline - time.monotonic()
-                if initial_stop() or remaining < 1:
+                if stopped() or remaining < 1:
                     break
                 try:
                     item = spyrrow.Item(str(rejected.part), list(outlines[rejected.part].exterior.coords), 1, None)
@@ -275,13 +279,15 @@ def optimize(
                     normalized = _normalize((placement,), outlines, region.bounds, True, False)
                     angles.extend((normalized[0].angle + quarter) % 360 for quarter in (0, 90, 180, 270))
                 candidate = pack(
-                    parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=initial_stop
+                    parts, zone, replace(baseline_options, rotations=tuple(dict.fromkeys(angles))), cancel=stopped
                 )
                 if not candidate.rejected:
                     best = candidate
                     break
         except Cancelled:
-            if cancel is not None and cancel():
+            # Only our observed finish/budget signal is a successful stop.
+            # An operator callback may report cancellation just once.
+            if not soft_stop_requested:
                 raise
             return best
         if best.rejected:
@@ -294,11 +300,6 @@ def optimize(
     def report(engine, diagnostic=None):
         if progress is not None:
             progress(SearchProgress(engine, time.monotonic() - started, best, attempt, diagnostic))
-
-    def stopped():
-        if cancel is not None and cancel():
-            raise Cancelled
-        return time.monotonic() >= deadline or (finish is not None and finish())
 
     def accept(candidate):
         nonlocal best
@@ -320,7 +321,7 @@ def optimize(
         try:
             candidate = pack(parts, zone, replace(baseline_options, rotations=rotations), cancel=stopped)
         except Cancelled:
-            if cancel is not None and cancel():
+            if not soft_stop_requested:
                 raise
             return best
         accept(candidate)

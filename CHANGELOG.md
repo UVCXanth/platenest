@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **Cancellation:** a one-shot operator cancellation in either raster recovery or bitmap restarts
+  now propagates as `Cancelled`. Finish and budget expiry still return the best known result;
+  their observed outcome is retained instead of polling the cancellation callback again.
 - **Long-search recovery:** a failed finite-angle seed can try additional rigid and native free-angle seeds.
   A recoverable native trial error retains the last validated layout and reports a diagnostic; cancellation
   and resource failures still propagate. Each active group receives its own restricted/free rotation cycle.

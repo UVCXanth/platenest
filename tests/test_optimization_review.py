@@ -6,8 +6,69 @@ import pytest
 import spyrrow
 from shapes import box, u_shape
 
+import platenest.optimization as search
 from platenest import Cancelled, Options, Part, Zone, optimize, pack
 from platenest.optimization import _geometry, _valid
+
+
+@pytest.mark.parametrize("recovery", [False, True], ids=["bitmap-restart", "free-angle-recovery"])
+@pytest.mark.parametrize("signal", ["cancel", "cancel-exception", "finish", "deadline", "resource-error"])
+def test_raster_stop_observation_is_not_polled_again(monkeypatch, recovery, signal):
+    vertices, triangles = box(100, 3, 2) if recovery else box(20, 20, 2)
+    angle = math.radians(7.5) if recovery else 0
+    rotation = np.array([[math.cos(angle), math.sin(angle), 0], [-math.sin(angle), math.cos(angle), 0], [0, 0, 1]])
+    parts = [Part(np.asarray(vertices) @ rotation, triangles)]
+    zone = Zone(77, 77)
+    options = Options(spacing=2, rotations=tuple(range(0, 360, 15)))
+    expected = pack(parts, zone, options)
+    assert bool(expected.rejected) is recovery
+    real_pack = search.pack
+    calls = 0
+    armed = False
+    observations = 0
+
+    def traced_pack(*args, **kwargs):
+        nonlocal calls, armed
+        calls += 1
+        armed = calls > 1
+        return real_pack(*args, **kwargs)
+
+    def cancel():
+        nonlocal observations
+        if armed and signal in {"cancel", "cancel-exception", "resource-error"}:
+            observations += 1
+            if observations == 1:
+                if signal == "cancel-exception":
+                    raise Cancelled
+                if signal == "resource-error":
+                    raise MemoryError
+                return True
+        return False
+
+    def finish():
+        nonlocal observations
+        if armed and signal == "finish":
+            observations += 1
+            return observations == 1
+        return False
+
+    def monotonic():
+        nonlocal observations
+        if armed and signal == "deadline":
+            observations += 1
+            return 20.0
+        return 0.0
+
+    monkeypatch.setattr(search, "pack", traced_pack)
+    monkeypatch.setattr(search.time, "monotonic", monotonic)
+    kwargs = dict(free_rotation=recovery, seconds=10, cancel=cancel, finish=finish)
+    if signal in {"cancel", "cancel-exception", "resource-error"}:
+        with pytest.raises(MemoryError if signal == "resource-error" else Cancelled):
+            optimize(parts, zone, options, **kwargs)
+    else:
+        assert optimize(parts, zone, options, **kwargs) == expected
+    assert calls == 2, "exercise a raster stop inside the optimizer's exception handler"
+    assert observations == 1, "use the outcome already observed by the packer"
 
 
 def test_free_rotation_recovers_between_seed_angles():
